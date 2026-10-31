@@ -3,6 +3,7 @@ package com.sportradar.scoreboard;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sportradar.scoreboard.exception.MatchNotLiveException;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -71,6 +72,39 @@ class SummaryTest {
         board.updateScore(older, 1, 0);
 
         assertThat(board.getSummary()).extracting(Match::id).containsExactly(newer, older);
+    }
+
+    @Test
+    void rematchCountsAsNewlyStarted() {
+        MatchId original = board.startMatch("Mexico", "Canada");
+        MatchId other = board.startMatch("Spain", "Brazil");
+        board.finishMatch(original);
+
+        MatchId rematch = board.startMatch("Mexico", "Canada");
+
+        assertThat(board.getSummary()).extracting(Match::id).containsExactly(rematch, other);
+    }
+
+    @Test
+    void updateWithOldIdCannotReachRematch() {
+        MatchId original = board.startMatch("Mexico", "Canada");
+        board.finishMatch(original);
+        MatchId rematch = board.startMatch("Mexico", "Canada");
+
+        assertThatThrownBy(() -> board.updateScore(original, 1, 0))
+                .isInstanceOf(MatchNotLiveException.class);
+
+        assertThat(board.getSummary()).containsExactly(new Match(rematch, "Mexico", "Canada", 0, 0));
+    }
+
+    @Test
+    void summaryContainsNoFinishedMatches() {
+        MatchId finished = board.startMatch("Mexico", "Canada");
+        MatchId live = board.startMatch("Spain", "Brazil");
+
+        board.finishMatch(finished);
+
+        assertThat(board.getSummary()).extracting(Match::id).containsExactly(live);
     }
 
     @Test

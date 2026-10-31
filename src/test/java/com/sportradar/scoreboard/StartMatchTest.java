@@ -158,6 +158,27 @@ class StartMatchTest {
     }
 
     @Test
+    void newMatchUsesItsOwnSpellingAfterFinish() {
+        board.finishMatch(board.startMatch("Mexico", "Canada"));
+
+        board.startMatch("MEXICO", "Spain");
+
+        assertThat(board.getSummary()).extracting(Match::homeTeam).containsExactly("MEXICO");
+    }
+
+    @Test
+    void teamsCanStartAgainWithNewIdAtNilNil() {
+        MatchId first = board.startMatch("Mexico", "Canada");
+        board.updateScore(first, 2, 1);
+        board.finishMatch(first);
+
+        MatchId second = board.startMatch("Mexico", "Canada");
+
+        assertThat(second).isNotEqualTo(first);
+        assertThat(board.getSummary()).containsExactly(new Match(second, "Mexico", "Canada", 0, 0));
+    }
+
+    @Test
     void innerSpacesCountAsDifferentTeams() {
         board.startMatch("South Korea", "Mexico");
 

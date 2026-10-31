@@ -1,6 +1,7 @@
 package com.sportradar.scoreboard;
 
 import com.sportradar.scoreboard.exception.MatchNotFoundException;
+import com.sportradar.scoreboard.exception.MatchNotLiveException;
 import com.sportradar.scoreboard.exception.TeamAlreadyPlayingException;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -17,11 +18,24 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 final class InMemoryScoreboard implements Scoreboard {
 
+    static final int DEFAULT_MAX_FINISHED_MATCHES = 1000;
+
     private final ReentrantLock lock = new ReentrantLock();
     // Insertion order records start order. Updates use put, which keeps a match's position.
     private final LinkedHashMap<MatchId, Match> live = new LinkedHashMap<>();
     private final Map<String, MatchId> liveTeams = new HashMap<>();
+    // Insertion order records finish order, so the first entry is the next to evict.
+    private final LinkedHashMap<MatchId, Match> finished = new LinkedHashMap<>();
+    private final int maxFinishedMatches;
     private volatile Snapshot snapshot = new Snapshot(List.of());
+
+    InMemoryScoreboard(int maxFinishedMatches) {
+        if (maxFinishedMatches < 1) {
+            throw new IllegalArgumentException(
+                    "Maximum finished matches must be at least 1: " + maxFinishedMatches);
+        }
+        this.maxFinishedMatches = maxFinishedMatches;
+    }
 
     @Override
     public MatchId startMatch(String homeTeam, String awayTeam) {
@@ -69,6 +83,26 @@ final class InMemoryScoreboard implements Scoreboard {
     }
 
     @Override
+    public void finishMatch(MatchId id) {
+        requireNotNull(id);
+
+        lock.lock();
+        try {
+            Match match = requireLive(id);
+            live.remove(id);
+            liveTeams.remove(TeamName.of(match.homeTeam()).key());
+            liveTeams.remove(TeamName.of(match.awayTeam()).key());
+            finished.put(id, match);
+            if (finished.size() > maxFinishedMatches) {
+                finished.pollFirstEntry();
+            }
+            publish();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
     public List<Match> getSummary() {
         return snapshot.live();
     }
@@ -94,10 +128,16 @@ final class InMemoryScoreboard implements Scoreboard {
 
     private Match requireLive(MatchId id) {
         Match match = live.get(id);
-        if (match == null) {
-            throw new MatchNotFoundException("No match found with ID " + id.value());
+        if (match != null) {
+            return match;
         }
-        return match;
+        Match finishedMatch = finished.get(id);
+        if (finishedMatch != null) {
+            throw new MatchNotLiveException("Match " + id.value() + " ("
+                    + finishedMatch.homeTeam() + " vs " + finishedMatch.awayTeam()
+                    + ") is not live, it has already finished");
+        }
+        throw new MatchNotFoundException("No match found with ID " + id.value());
     }
 
     private void requireNotPlaying(TeamName home, TeamName away) {

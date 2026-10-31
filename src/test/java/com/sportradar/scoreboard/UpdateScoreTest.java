@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sportradar.scoreboard.exception.MatchNotFoundException;
+import com.sportradar.scoreboard.exception.MatchNotLiveException;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -126,6 +127,49 @@ class UpdateScoreTest {
 
         assertThatThrownBy(() -> board.updateScore(idFromOtherBoard, 1, 0))
                 .isInstanceOf(MatchNotFoundException.class);
+    }
+
+    @Test
+    void retainedFinishedIdGivesMatchNotLive() {
+        MatchId id = board.startMatch("Mexico", "Canada");
+        board.updateScore(id, 2, 1);
+        board.finishMatch(id);
+
+        assertThatThrownBy(() -> board.updateScore(id, 3, 1))
+                .isInstanceOf(MatchNotLiveException.class)
+                .hasMessage("Match " + id.value()
+                        + " (Mexico vs Canada) is not live, it has already finished");
+    }
+
+    @Test
+    void resendingFinalScoreGivesMatchNotLive() {
+        MatchId id = board.startMatch("Mexico", "Canada");
+        board.updateScore(id, 2, 1);
+        board.finishMatch(id);
+
+        assertThatThrownBy(() -> board.updateScore(id, 2, 1))
+                .isInstanceOf(MatchNotLiveException.class);
+    }
+
+    @Test
+    void evictedIdGivesMatchNotFound() {
+        Scoreboard smallBoard = Scoreboard.create(1);
+        MatchId first = smallBoard.startMatch("Mexico", "Canada");
+        MatchId second = smallBoard.startMatch("Spain", "Brazil");
+        smallBoard.finishMatch(first);
+        smallBoard.finishMatch(second);
+
+        assertThatThrownBy(() -> smallBoard.updateScore(first, 1, 0))
+                .isInstanceOf(MatchNotFoundException.class);
+    }
+
+    @Test
+    void negativeScoreOnFinishedIdGivesInputError() {
+        MatchId id = board.startMatch("Mexico", "Canada");
+        board.finishMatch(id);
+
+        assertThatThrownBy(() -> board.updateScore(id, -1, 0))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

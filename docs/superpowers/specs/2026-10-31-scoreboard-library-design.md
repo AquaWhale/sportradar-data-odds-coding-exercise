@@ -619,7 +619,7 @@ Web sources were weak and disagreed, and no ranked FIFA list was found, so 32 is
   - Future improvements.
 - `AI.md`, with these parts:
   - A summary of how AI tools were used, plus context such as the tools and models.
-  - Artifacts that guided the implementation: this spec, the implementation plan and both review reports in `docs/superpowers/`, each linked. The assignment PDF is mentioned but not included.
+  - Artifacts that guided the implementation: this spec, the implementation plan and the review reports in `docs/superpowers/`, each linked. The assignment PDF is mentioned but not included.
   - Prompt history across every session, including implementation, either in `AI.md` or in a linked transcript. User prompts are kept verbatim where available. Model output is lightly summarised for readability, so it is clear how the user guided the AI to the implementation.
 - `docs/superpowers/`, committed: the spec, the implementation plan, and the review reports in `reviews/`.
 - Core commits contain the finished map, cap, eviction, the "not live" error, and tests that use IDs only, such as tests 19, 25 and 37.

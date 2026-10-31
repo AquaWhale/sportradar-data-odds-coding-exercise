@@ -1,7 +1,9 @@
 package com.sportradar.scoreboard;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sportradar.scoreboard.exception.MatchNotFoundException;
 import com.sportradar.scoreboard.exception.MatchNotLiveException;
 import com.sportradar.scoreboard.exception.TeamAlreadyPlayingException;
 import java.util.ArrayList;
@@ -129,7 +131,80 @@ class ConcurrencyTest {
         board.finishMatch(id);
 
         // A different exception would surface here as an ExecutionException.
-        assertThat(updater.get()).isPositive();
+        int lastSuccessful = updater.get();
+        assertThat(lastSuccessful).isPositive();
+        assertThat(board.getFinishedMatches())
+                .extracting(Match::homeScore)
+                .containsExactly(lastSuccessful);
+    }
+
+    @Test
+    void readingSummaryThenFinishedAlwaysFindsEachMatch() throws Exception {
+        List<MatchId> ids = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            ids.add(board.startMatch("Home " + i, "Away " + i));
+        }
+        AtomicBoolean finishing = new AtomicBoolean(true);
+
+        Future<?> reader = executor.submit(() -> {
+            while (finishing.get()) {
+                Set<MatchId> seen = new HashSet<>();
+                board.getSummary().forEach(match -> seen.add(match.id()));
+                board.getFinishedMatches().forEach(match -> seen.add(match.id()));
+                assertThat(seen).containsAll(ids);
+            }
+        });
+
+        List<Callable<Boolean>> finishes = new ArrayList<>();
+        for (MatchId id : ids) {
+            finishes.add(() -> {
+                board.finishMatch(id);
+                return true;
+            });
+        }
+        List<Outcome<Boolean>> outcomes = runTogether(executor, finishes);
+        finishing.set(false);
+
+        assertThat(failures(outcomes)).isEmpty();
+        reader.get(20, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void concurrentFinishesNeverExceedTheCap() throws Exception {
+        int cap = 4;
+        Scoreboard smallBoard = Scoreboard.create(cap);
+        List<MatchId> ids = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            ids.add(smallBoard.startMatch("Home " + i, "Away " + i));
+        }
+        AtomicBoolean finishing = new AtomicBoolean(true);
+
+        Future<?> reader = executor.submit(() -> {
+            while (finishing.get()) {
+                assertThat(smallBoard.getFinishedMatches().size()).isLessThanOrEqualTo(cap);
+            }
+        });
+
+        List<Callable<Boolean>> finishes = new ArrayList<>();
+        for (MatchId id : ids) {
+            finishes.add(() -> {
+                smallBoard.finishMatch(id);
+                return true;
+            });
+        }
+        List<Outcome<Boolean>> outcomes = runTogether(executor, finishes);
+        finishing.set(false);
+
+        assertThat(failures(outcomes)).isEmpty();
+        reader.get(20, TimeUnit.SECONDS);
+        List<MatchId> retained = smallBoard.getFinishedMatches().stream().map(Match::id).toList();
+        assertThat(retained).hasSize(cap);
+        for (MatchId id : ids) {
+            if (!retained.contains(id)) {
+                assertThatThrownBy(() -> smallBoard.updateScore(id, 1, 0))
+                        .isInstanceOf(MatchNotFoundException.class);
+            }
+        }
     }
 
     @Test

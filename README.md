@@ -28,6 +28,11 @@ for (Match match : board.getSummary()) {
 // Mexico 0 - Canada 5
 
 board.finishMatch(mexicoCanada);
+
+for (Match match : board.getFinishedMatches()) {
+    System.out.println(match);
+}
+// Mexico 0 - Canada 5
 ```
 
 `Scoreboard.create(int)` sets how many finished matches are retained. The default is 1000.
@@ -107,20 +112,23 @@ Numbers match the design spec's register.
 | 22 | When both teams are live, one error names both | The caller sees the whole problem |
 | 23 | Distinct errors for not found and not live | Exact errors |
 | 24 | Finish accepts any score, including 0-0 | A 0-0 draw is a real result |
-| 25 | An empty board returns an empty list | A normal state |
-| 26 | Returned lists are immutable and fixed | They cannot alter the board |
+| 25 | Empty board and empty finished list return empty lists | Normal states |
+| 26 | Lists are immutable and fixed | They cannot alter the board |
+| 27 | Extra operation is `getFinishedMatches`, newest first | Uses retained data, gives a results view |
 | 28 | Finished matches capped, FIFO eviction | Strict memory bound for finished matches |
 | 29 | Default cap 1000, minimum 1 | Holds about ten tournaments, newest always kept |
 | 30 | Evicted ID gives match not found | Keeps memory strictly bounded |
 | 31 | No live match cap | Bounded by the number of teams, avoids a new failure |
 | 32 | Interface plus static factories, no builder | One setting only |
-| 33 | `Match` record for results | Immutable and format-free |
+| 33 | `Match` record for both lists | Immutable and format-free |
 | 34 | `updateScore` and `finishMatch` return `void` | Small API |
 | 35 | `IllegalArgumentException` for invalid input, custom unchecked state exceptions | Familiar, and callers can catch exactly |
 | 36 | Lock plus published snapshot | Non-blocking reads, no retries, predictable |
 | 37 | Default non-fair `ReentrantLock` | Waits are microseconds |
 | 38 | Java 21 LTS | Compatibility, builds on JDK 25 |
 | 39 | JUnit 5 and AssertJ | Readable tests, no runtime dependency |
+| 40 | Core keeps the finished map, cap, eviction and "not live" error. The feature commit adds the finished list to `Snapshot`, its rebuild and `getFinishedMatches` | Core errors need retention, and core holds no dead code |
+| 41 | Two-list consistency is not provided | A combined read would be another operation |
 | 42 | `MatchId` rejects a null value when constructed | An invalid ID cannot exist |
 | 43 | Both negative scores are named in one error | Shows the whole problem at once |
 | 44 | Error messages use one agreed wording | Clear, exact errors |
@@ -134,6 +142,7 @@ Numbers match the design spec's register.
 | 52 | Writes come from several threads, in low volume with short bursts | The library must handle real write contention |
 | 53 | Read-your-writes across threads | A completed write is visible to any summary that starts afterwards |
 | 54 | `Match` has no constructor validation | The library never accepts a `Match` from callers, so a hand-built one cannot reach the board |
+| 55 | `create(int)` is configuration, not a second extra operation | It sets a limit rather than adding scoreboard behaviour, so `getFinishedMatches` stays the one extra operation |
 | 56 | `Match.toString` prints `Mexico 0 - Canada 5` | Readable output, matching the brief's score format |
 | 57 | Custom exceptions live in the `com.sportradar.scoreboard.exception` subpackage | Keeps them apart from the core API types |
 
@@ -151,7 +160,9 @@ Numbers match the design spec's register.
 | `synchronized` | Less code, and acceptable here: JEP 444 says `synchronized` guarding in-memory operations need not be replaced. `ReentrantLock` was still chosen because a blocked virtual thread parks and frees its carrier on Java 21, at the cost of one `try/finally`. JDK 24 removed this pinning, and we target 21 |
 | Fair lock | Costs throughput, and waits are already microseconds |
 
-The chosen approach copies and sorts in the write, under the lock. A very large custom cap would make all writers wait during a finish, but never readers.
+The chosen approach copies and sorts in the write, under the lock, and only `finish` rebuilds the finished list. A very large custom cap would make all writers wait during a finish, but never readers.
+
+`getSummary` and `getFinishedMatches` are separate calls, so a finish can land between them. A combined read would be a further operation, which the brief disallows. Calling `getSummary` first and `getFinishedMatches` second guarantees that any match started before the `getSummary` call appears in at least one list, unless it has been evicted.
 
 ### Internal structure
 
@@ -183,14 +194,16 @@ The chosen approach copies and sorts in the write, under the lock. A very large 
 | Finish | Require one update first | A scoreless draw would need a pointless update |
 | Summary | Throw on an empty board | An idle board is normal |
 | Summary content | Formatted strings | Callers would parse text, and the ID is lost |
+| Fifth operation | Another operation, such as finding a live match by team | Finished list uses data already retained |
 | Retention | Keep all finished matches | Memory is not strictly bounded |
 | Retention | Keep evicted IDs | The ID set grows forever |
+| Finished order | Same as summary, or oldest first | The newest result would not be at the top |
 | Live matches | Enforced or configurable cap | Adds a failure to `startMatch` |
 | API shape | Single public class | The implementation becomes the API |
 | API shape | Match handle objects | Mutating handles complicate thread safety |
 | API shape | Builder | Only one setting exists |
 | `updateScore` return | `boolean`, or the `Match` | The no-op stays internal, for a smaller API |
-| `finishMatch` return | The finished `Match` | Smaller API |
+| `finishMatch` return | The finished `Match` | Smaller API, with the result in the finished list |
 | Exceptions | All custom types, or JDK types only | Replaces a familiar exception, or forces parsing message text |
 | Null input | `NullPointerException` | Invalid input would need two exception types |
 | Default cap | 104 or 10000 | 104 leaves no margin, and 10000 is more than needed |
@@ -198,7 +211,9 @@ The chosen approach copies and sorts in the write, under the lock. A very large 
 | Name cap | Configurable | No real use case, and would need a second setting |
 | Java version | 25 or 17 | 25 excludes reviewers on older JDKs, and 17 has no sequenced collections, which `sequencedValues()` needs |
 | Test stack | JUnit only, or adding jcstress | Wordier assertions, or a heavy setup for a simple library |
+| Feature commit | All retention work, or only the getter | Changes earlier error behaviour, or leaves dead code in core |
 | Update order | Sequence number on updates | Changes the API, and is listed as a future improvement |
+| Two-list reads | Combined read | A further operation, which the brief disallows |
 
 ### Excluded scope
 
@@ -232,12 +247,12 @@ The rebuild takes the live values newest first, then sorts by total descending w
 
 1. A write validates input outside the lock, and `startMatch` generates its UUID there too.
 2. It takes the lock in `try/finally`, checks state and applies the change.
-3. It rebuilds the sorted live list and publishes a new immutable `Snapshot` through a `volatile` field.
+3. It rebuilds the affected list and publishes a new immutable `Snapshot` through a `volatile` field. `start` and `update` rebuild the sorted live list, and `finish` rebuilds both lists.
 4. It releases the lock.
 
 A no-op skips the rebuild and the publish. A rejection changes nothing.
 
-`getSummary` reads the `volatile` field and returns the immutable list, without taking the lock.
+`getSummary` and `getFinishedMatches` read the `volatile` field and return the immutable list, without taking the lock.
 
 ### Why this concurrency approach
 
@@ -254,6 +269,7 @@ So a single atomic write section is needed in any approach. Reads vastly outnumb
 - A blocked virtual thread parks rather than pins on Java 21.
 - There are no retries and no wasted work.
 - Read-your-writes holds because the write publishes before it returns.
+- A finishing match moves between lists in one snapshot.
 
 ## Research
 
@@ -312,6 +328,22 @@ Web sources were weak and disagreed, and no ranked FIFA list was found, so 32 is
 - [JEP 491](https://openjdk.org/jeps/491)
 - [InfoQ: virtual threads after JDK 24](https://infoq.com/articles/virtual-threads-after-jdk24)
 
+## Additional feature: recently finished matches
+
+`getFinishedMatches()` returns finished matches with their final scores, most recently finished first. An empty history returns an empty list, and the result is immutable and fixed, like the summary.
+
+**Why this feature:** the board has to retain finished matches anyway, so it can tell a late update on a finished match (`MatchNotLiveException`) from an unknown ID (`MatchNotFoundException`). Exposing that data gives callers a results view beside the live summary, at very little extra cost. `finishMatch` returns nothing, so this is also how a caller reads a final result.
+
+**Bounded retention:** history keeps the last 1000 finished matches by default, about ten 104-match tournaments. With one instance per tournament, eviction never fires, so the cap protects against a long-lived instance. `Scoreboard.create(int)` changes the limit, and it must be at least 1. Eviction is first in, first out.
+
+**What this means for callers:**
+
+- The minimum cap is one so history retains at least the most recently finished match. History is bounded; a particular result may be evicted before a caller retrieves it.
+- An evicted match's ID gives `MatchNotFoundException`, because the library no longer holds a record of it. Old IDs cannot be told apart from unknown ones.
+- The strict memory bound covers finished matches only. Live matches are bounded in practice by the number of teams.
+
+`Scoreboard.create(int)` is configuration rather than a second extra operation: it sets a limit, and adds no scoreboard behaviour.
+
 ## Tests
 
 Tests use JUnit 5 and AssertJ, and each test class covers one area:
@@ -322,6 +354,7 @@ Tests use JUnit 5 and AssertJ, and each test class covers one area:
 | `UpdateScoreTest` | Absolute updates, no-ops, corrections, overflow and error order |
 | `FinishMatchTest` | Finishing, releasing teams, retention and eviction |
 | `SummaryTest` | The brief's example, ordering, tiebreaks and immutability |
+| `FinishedMatchesTest` | Finished order, final scores, the cap and immutability |
 | `ConfigurationTest` | The default cap and invalid caps |
 | `TeamNameTest`, `MatchTest`, `MatchIdTest`, `ScoreboardExceptionTest` | The supporting types |
 | `ConcurrencyTest` | Races between threads, using JDK executors and latches |
@@ -329,7 +362,7 @@ Tests use JUnit 5 and AssertJ, and each test class covers one area:
 Concurrency tests have limits:
 
 - They use timeouts and `shutdownNow`, so a held lock fails the test instead of hanging the build.
-- Running them against a board with the lock removed fails 4 of the 11 tests. A race test cannot guarantee which ordering occurs, so passing is evidence rather than proof.
+- Running them against a board with the lock removed fails several of them. A race test cannot guarantee which ordering occurs, so passing is evidence rather than proof.
 - The read-your-writes test catches a late publish, but it cannot prove `volatile` is needed, because the hand-off between threads creates its own happens-before edge. That guarantee rests on publishing under the lock.
 - The virtual thread test detects failures and hangs, but cannot show parking versus pinning.
 

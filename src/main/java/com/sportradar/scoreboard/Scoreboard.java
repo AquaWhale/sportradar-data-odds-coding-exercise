@@ -80,4 +80,18 @@ public interface Scoreboard {
      *     is live
      */
     List<Match> getSummary();
+
+    /**
+     * Returns the retained finished matches with their final scores, most recently finished
+     * first. History is bounded, so a particular result may be evicted before a caller retrieves
+     * it.
+     *
+     * <p>This call and {@link #getSummary()} are separate reads, so a finish can land between
+     * them. Calling {@code getSummary} first guarantees that any match started before that call
+     * appears in at least one list, unless it has been evicted.
+     *
+     * @return an immutable list that later changes to the board do not affect, empty if no match
+     *     has finished
+     */
+    List<Match> getFinishedMatches();
 }

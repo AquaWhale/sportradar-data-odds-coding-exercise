@@ -27,7 +27,7 @@ final class InMemoryScoreboard implements Scoreboard {
     // Insertion order records finish order, so the first entry is the next to evict.
     private final LinkedHashMap<MatchId, Match> finished = new LinkedHashMap<>();
     private final int maxFinishedMatches;
-    private volatile Snapshot snapshot = new Snapshot(List.of());
+    private volatile Snapshot snapshot = new Snapshot(List.of(), List.of());
 
     InMemoryScoreboard(int maxFinishedMatches) {
         if (maxFinishedMatches < 1) {
@@ -57,7 +57,7 @@ final class InMemoryScoreboard implements Scoreboard {
             live.put(id, new Match(id, home.displayName(), away.displayName(), 0, 0));
             liveTeams.put(home.key(), id);
             liveTeams.put(away.key(), id);
-            publish();
+            publishLive();
             return id;
         } finally {
             lock.unlock();
@@ -76,7 +76,7 @@ final class InMemoryScoreboard implements Scoreboard {
                 return;
             }
             live.put(id, new Match(id, match.homeTeam(), match.awayTeam(), homeScore, awayScore));
-            publish();
+            publishLive();
         } finally {
             lock.unlock();
         }
@@ -96,7 +96,8 @@ final class InMemoryScoreboard implements Scoreboard {
             if (finished.size() > maxFinishedMatches) {
                 finished.pollFirstEntry();
             }
-            publish();
+            // One snapshot carries both lists, so a match moves between them atomically.
+            snapshot = new Snapshot(sortedLive(), List.copyOf(finished.sequencedValues().reversed()));
         } finally {
             lock.unlock();
         }
@@ -105,6 +106,11 @@ final class InMemoryScoreboard implements Scoreboard {
     @Override
     public List<Match> getSummary() {
         return snapshot.live();
+    }
+
+    @Override
+    public List<Match> getFinishedMatches() {
+        return snapshot.finished();
     }
 
     private static void requireNotNull(MatchId id) {
@@ -164,13 +170,17 @@ final class InMemoryScoreboard implements Scoreboard {
                 + match.homeTeam() + " vs " + match.awayTeam();
     }
 
-    private void publish() {
+    private void publishLive() {
+        snapshot = new Snapshot(sortedLive(), snapshot.finished());
+    }
+
+    private List<Match> sortedLive() {
         // Newest first, then a stable sort, so equal totals stay most recently started first.
         List<Match> sorted = new ArrayList<>(live.sequencedValues().reversed());
         sorted.sort(Comparator.comparingLong(Match::totalScore).reversed());
-        snapshot = new Snapshot(List.copyOf(sorted));
+        return List.copyOf(sorted);
     }
 
-    private record Snapshot(List<Match> live) {
+    private record Snapshot(List<Match> live, List<Match> finished) {
     }
 }

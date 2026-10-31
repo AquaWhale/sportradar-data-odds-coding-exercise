@@ -1,5 +1,6 @@
 package com.sportradar.scoreboard;
 
+import com.sportradar.scoreboard.exception.MatchNotFoundException;
 import com.sportradar.scoreboard.exception.TeamAlreadyPlayingException;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -50,8 +51,53 @@ final class InMemoryScoreboard implements Scoreboard {
     }
 
     @Override
+    public void updateScore(MatchId id, int homeScore, int awayScore) {
+        requireNotNull(id);
+        requireNotNegative(homeScore, awayScore);
+
+        lock.lock();
+        try {
+            Match match = requireLive(id);
+            if (match.homeScore() == homeScore && match.awayScore() == awayScore) {
+                return;
+            }
+            live.put(id, new Match(id, match.homeTeam(), match.awayTeam(), homeScore, awayScore));
+            publish();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
     public List<Match> getSummary() {
         return snapshot.live();
+    }
+
+    private static void requireNotNull(MatchId id) {
+        if (id == null) {
+            throw new IllegalArgumentException("Match ID must not be null");
+        }
+    }
+
+    private static void requireNotNegative(int homeScore, int awayScore) {
+        if (homeScore < 0 && awayScore < 0) {
+            throw new IllegalArgumentException(
+                    "Scores must not be negative: home " + homeScore + ", away " + awayScore);
+        }
+        if (homeScore < 0) {
+            throw new IllegalArgumentException("Home score must not be negative: " + homeScore);
+        }
+        if (awayScore < 0) {
+            throw new IllegalArgumentException("Away score must not be negative: " + awayScore);
+        }
+    }
+
+    private Match requireLive(MatchId id) {
+        Match match = live.get(id);
+        if (match == null) {
+            throw new MatchNotFoundException("No match found with ID " + id.value());
+        }
+        return match;
     }
 
     private void requireNotPlaying(TeamName home, TeamName away) {

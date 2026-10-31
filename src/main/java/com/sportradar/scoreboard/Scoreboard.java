@@ -1,5 +1,6 @@
 package com.sportradar.scoreboard;
 
+import com.sportradar.scoreboard.exception.MatchNotFoundException;
 import com.sportradar.scoreboard.exception.TeamAlreadyPlayingException;
 import java.util.List;
 
@@ -32,6 +33,19 @@ public interface Scoreboard {
      * @throws TeamAlreadyPlayingException if either team is already in a live match
      */
     MatchId startMatch(String homeTeam, String awayTeam);
+
+    /**
+     * Sets the absolute score of both teams. Scores may be lowered, for corrections. Sending the
+     * current score changes nothing. Callers are expected to deliver a match's updates in order,
+     * because an older score delivered late is applied like a correction.
+     *
+     * @param id the match ID
+     * @param homeScore the home team score, not negative
+     * @param awayScore the away team score, not negative
+     * @throws IllegalArgumentException if {@code id} is null or a score is negative
+     * @throws MatchNotFoundException if the ID is unknown to this board
+     */
+    void updateScore(MatchId id, int homeScore, int awayScore);
 
     /**
      * Returns the live matches, ordered by total score descending, then most recently started

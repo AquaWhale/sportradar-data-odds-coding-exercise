@@ -4,6 +4,7 @@ import com.sportradar.scoreboard.exception.MatchNotFoundException;
 import com.sportradar.scoreboard.exception.MatchNotLiveException;
 import com.sportradar.scoreboard.exception.TeamAlreadyPlayingException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -178,7 +179,8 @@ final class InMemoryScoreboard implements Scoreboard {
         // Newest first, then a stable sort, so equal totals stay most recently started first.
         List<Match> sorted = new ArrayList<>(live.sequencedValues().reversed());
         sorted.sort(Comparator.comparingLong(Match::totalScore).reversed());
-        return List.copyOf(sorted);
+        // Safe without a copy: nothing else holds sorted, so the wrapped list can never change.
+        return Collections.unmodifiableList(sorted);
     }
 
     private record Snapshot(List<Match> live, List<Match> finished) {

@@ -4,11 +4,13 @@ A thread-safe Java library that manages a live football World Cup scoreboard acr
 
 ## Build and test
 
-Requires JDK 21 or newer and Maven 3.9.
+Requires JDK 21 or newer. The Maven Wrapper downloads the right Maven version on first use.
 
 ```bash
-mvn verify
+./mvnw verify
 ```
+
+On Windows, use `mvnw.cmd verify`.
 
 ## Usage
 
@@ -50,6 +52,7 @@ src/test/java/com/sportradar/scoreboard/
                             Unit and concurrency tests, see Tests below
 docs/superpowers/           Design spec, implementation plan and review reports
 AI.md                       How AI was used, artifacts and prompt history
+mvnw, mvnw.cmd, .mvn/       Maven Wrapper
 ```
 
 ## Core operations

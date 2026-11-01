@@ -5,12 +5,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sportradar.scoreboard.exception.MatchNotFoundException;
 import com.sportradar.scoreboard.exception.MatchNotLiveException;
+import com.sportradar.scoreboard.exception.ScoreboardException;
 import com.sportradar.scoreboard.exception.TeamAlreadyPlayingException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -141,19 +143,29 @@ class ConcurrencyTest {
     @Test
     void readingSummaryThenFinishedAlwaysFindsEachMatch() throws Exception {
         List<MatchId> ids = new ArrayList<>();
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 500; i++) {
             ids.add(board.startMatch("Home " + i, "Away " + i));
         }
         AtomicBoolean finishing = new AtomicBoolean(true);
+        CountDownLatch readerStarted = new CountDownLatch(1);
 
+        // A plain loop keeps the reader fast, so it reads often enough to see a split publish.
         Future<?> reader = executor.submit(() -> {
             while (finishing.get()) {
                 Set<MatchId> seen = new HashSet<>();
-                board.getSummary().forEach(match -> seen.add(match.id()));
-                board.getFinishedMatches().forEach(match -> seen.add(match.id()));
-                assertThat(seen).containsAll(ids);
+                for (Match match : board.getSummary()) {
+                    seen.add(match.id());
+                }
+                for (Match match : board.getFinishedMatches()) {
+                    seen.add(match.id());
+                }
+                if (seen.size() != ids.size()) {
+                    throw new AssertionError("Saw " + seen.size() + " of " + ids.size());
+                }
+                readerStarted.countDown();
             }
         });
+        readerStarted.await();
 
         List<Callable<Boolean>> finishes = new ArrayList<>();
         for (MatchId id : ids) {
@@ -162,8 +174,12 @@ class ConcurrencyTest {
                 return true;
             });
         }
-        List<Outcome<Boolean>> outcomes = runTogether(executor, finishes);
-        finishing.set(false);
+        List<Outcome<Boolean>> outcomes;
+        try {
+            outcomes = runTogether(executor, finishes);
+        } finally {
+            finishing.set(false);
+        }
 
         assertThat(failures(outcomes)).isEmpty();
         reader.get(20, TimeUnit.SECONDS);
@@ -192,8 +208,12 @@ class ConcurrencyTest {
                 return true;
             });
         }
-        List<Outcome<Boolean>> outcomes = runTogether(executor, finishes);
-        finishing.set(false);
+        List<Outcome<Boolean>> outcomes;
+        try {
+            outcomes = runTogether(executor, finishes);
+        } finally {
+            finishing.set(false);
+        }
 
         assertThat(failures(outcomes)).isEmpty();
         reader.get(20, TimeUnit.SECONDS);
@@ -237,12 +257,45 @@ class ConcurrencyTest {
             });
         }
 
-        List<Outcome<Boolean>> outcomes = runTogether(executor, writers);
-        writing.set(false);
+        List<Outcome<Boolean>> outcomes;
+        try {
+            outcomes = runTogether(executor, writers);
+        } finally {
+            writing.set(false);
+        }
 
         assertThat(failures(outcomes)).isEmpty();
         for (Future<?> reader : readers) {
             reader.get(20, TimeUnit.SECONDS);
+        }
+    }
+
+    // A held lock is reentrant for the rejecting thread, so only another thread can expose a leak.
+    @Test
+    void rejectedWritesReleaseTheLock() throws Exception {
+        MatchId live = board.startMatch("Mexico", "Canada");
+        MatchId finished = board.startMatch("Spain", "Brazil");
+        board.finishMatch(finished);
+        MatchId unknown = new MatchId(UUID.randomUUID());
+        List<Runnable> rejectedWrites = List.of(
+                () -> board.startMatch("Mexico", "Italy"),
+                () -> board.updateScore(unknown, 1, 0),
+                () -> board.updateScore(finished, 1, 0),
+                () -> board.finishMatch(unknown),
+                () -> board.finishMatch(finished));
+
+        for (Runnable rejectedWrite : rejectedWrites) {
+            ExecutorService rejectingThread = Executors.newSingleThreadExecutor();
+            try {
+                Future<?> rejection = rejectingThread.submit(rejectedWrite);
+                assertThatThrownBy(() -> rejection.get(20, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(ScoreboardException.class);
+
+                executor.submit(() -> board.updateScore(live, 1, 0)).get(20, TimeUnit.SECONDS);
+                executor.submit(() -> board.updateScore(live, 0, 0)).get(20, TimeUnit.SECONDS);
+            } finally {
+                rejectingThread.shutdownNow();
+            }
         }
     }
 

@@ -54,7 +54,7 @@ Home team name is 5230 characters, maximum is 1000
 Match 1b4e... (Mexico vs Canada) is not live, it has already finished
 ```
 
-`MatchNotFoundException` means the ID is unknown to this board, or its finished match has been evicted. `MatchNotLiveException` means the match finished and is still retained. Both state exceptions and `TeamAlreadyPlayingException` extend `ScoreboardException`, in the `com.sportradar.scoreboard.exception` package.
+`MatchNotFoundException` means the ID is unknown to this board, or its finished match has been evicted. `MatchNotLiveException` means the match finished and is still retained. All three state exceptions extend `ScoreboardException`, in the `com.sportradar.scoreboard.exception` package.
 
 ## Assumptions
 
@@ -262,7 +262,7 @@ What must change together decides the design:
 - Update: find the match, replace it, rebuild the live list.
 - Finish: remove from live, release both teams, add to finished, evict, rebuild.
 
-So a single atomic write section is needed in any approach. Reads vastly outnumber writes, which suits publishing a snapshot:
+So a single atomic write section is needed in any approach. Reads far outnumber state-changing writes, which suits publishing a snapshot:
 
 - Reads never block, and writers never block reads.
 - Writers block only each other, and only for microseconds. This is an estimate, not a measurement.

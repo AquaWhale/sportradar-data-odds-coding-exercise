@@ -188,17 +188,17 @@ class StartMatchTest {
 
     @Test
     void differentlyEncodedNamesCountAsDifferentTeams() {
-        board.startMatch("Curaçao", "Mexico");
+        board.startMatch("Cura\u00e7ao", "Mexico");
 
-        assertThatCode(() -> board.startMatch("Curaçao", "Canada"))
+        assertThatCode(() -> board.startMatch("Curac\u0327ao", "Canada"))
                 .doesNotThrowAnyException();
     }
 
     @Test
     void caseFoldingLimitTreatsTurkiyeSpellingsAsDifferentTeams() {
-        board.startMatch("TÜRKİYE", "Mexico");
+        board.startMatch("T\u00dcRK\u0130YE", "Mexico");
 
-        assertThatCode(() -> board.startMatch("Türkiye", "Canada"))
+        assertThatCode(() -> board.startMatch("T\u00fcrkiye", "Canada"))
                 .doesNotThrowAnyException();
     }
 
@@ -206,13 +206,13 @@ class StartMatchTest {
     void nonBreakingSpaceIsNotStripped() {
         board.startMatch("Spain", "Mexico");
 
-        assertThatCode(() -> board.startMatch("Spain ", "Canada"))
+        assertThatCode(() -> board.startMatch("Spain\u00a0", "Canada"))
                 .doesNotThrowAnyException();
     }
 
     @Test
     void nameOfOnlyNonBreakingSpaceIsAccepted() {
-        assertThatCode(() -> board.startMatch(" ", "Canada")).doesNotThrowAnyException();
+        assertThatCode(() -> board.startMatch("\u00a0", "Canada")).doesNotThrowAnyException();
     }
 
     @Test
@@ -261,7 +261,7 @@ class StartMatchTest {
 
     @Test
     void unicodeWhitespaceIsStripped() {
-        board.startMatch(" Mexico　", "Canada");
+        board.startMatch("\u2003Mexico\u3000", "Canada");
 
         assertThat(board.getSummary()).extracting(Match::homeTeam).containsExactly("Mexico");
     }

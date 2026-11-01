@@ -37,6 +37,21 @@ for (Match match : board.getFinishedMatches()) {
 
 `Scoreboard.create(int)` sets how many finished matches are retained. The default is 1000.
 
+## Project layout
+
+```
+src/main/java/com/sportradar/scoreboard/
+  Scoreboard.java           Public interface and factories, the only entry point
+  Match.java, MatchId.java  Public immutable types
+  InMemoryScoreboard.java   Package-private implementation: state, locking, snapshots
+  TeamName.java             Package-private name validation and comparison key
+  exception/                Public state exceptions
+src/test/java/com/sportradar/scoreboard/
+                            Unit and concurrency tests, see Tests below
+docs/superpowers/           Design spec, implementation plan and review reports
+AI.md                       How AI was used, artifacts and prompt history
+```
+
 ## Core operations
 
 | Operation | Behaviour | Rejected with |
@@ -65,14 +80,18 @@ The brief leaves these open on purpose.
 - A team can be in only one live match. Finishing a match frees both teams.
 - Teams are distinct home and away sides.
 - Team names are compared with surrounding whitespace removed, ignoring case. Each match displays the names it was started with.
+- Callers spell a team consistently, apart from case and surrounding whitespace. For example, `TÜRKİYE` and `Türkiye` count as different teams.
+- Callers keep the `MatchId` from `startMatch`, or read it from the summary. There is no lookup by team name.
 - Scores are non-negative `int` values with no upper limit from the library.
 - Lowering a score is allowed, for VAR corrections and mistakes.
 - Callers deliver each match's updates in order, which fits one consumer per match. The no-op protects only against an immediate duplicate of the current score. After 1-0 then 2-0, a redelivered 1-0 lowers the board, because the library cannot tell it from a correction. If two threads update one match, the last to take the lock wins.
 - A match can finish at any score, including 0-0 with no updates.
+- Callers read a final result before it is evicted, because finished history is bounded.
 - The library is thread-safe. The brief does not ask for this, so it is our own requirement.
 - One instance serves one tournament in one JVM.
 - Reads arrive at about 1-100 per second from a backend with its own cache or push layer, not from each viewer.
 - Writes come from several threads in low volume, with short bursts.
+- A completed write must be visible to any read that starts afterwards, across threads.
 - At most 24 matches are live, about 6 typically. The design is sized for 100, with no enforced limit.
 
 These are explicitly out of scope:
@@ -148,72 +167,94 @@ Numbers match the design spec's register.
 
 ## Trade-offs
 
-### Concurrency
+Each choice below shows what it gives, what it costs, and what was rejected.
 
-| Option | Why not chosen |
-|---|---|
-| Single `ReentrantLock` for everything, copy inside and sort outside | Least code, but readers and writers wait for each other, and each read copies and sorts |
-| `ReentrantReadWriteLock` | Readers still wait for writers, and each read still copies and sorts. More overhead than a plain lock for little gain |
-| Copy-on-write through a `volatile` field without a separate writer structure | Merged into the chosen approach, which keeps mutable writer state and publishes an immutable copy |
-| CAS with immutable state (`AtomicReference.updateAndGet`) | The strongest alternative: lock-free writes and one source of truth. Rejected because retries repeat copying and sorting, there is no fairness, and the transition function must have no side effects. The chosen approach is more predictable and easier to maintain for this load |
-| `ConcurrentHashMap` alone | Each map is safe, but check-then-insert across teams is not atomic, so two starts could both pass the live-team check |
-| `synchronized` | Less code, and acceptable here: JEP 444 says `synchronized` guarding in-memory operations need not be replaced. `ReentrantLock` was still chosen because a blocked virtual thread parks and frees its carrier on Java 21, at the cost of one `try/finally`. JDK 24 removed this pinning, and we target 21 |
-| Fair lock | Costs throughput, and waits are already microseconds |
+### Main choice: lock plus published snapshot
 
-The chosen approach copies and sorts in the write, under the lock, and only `finish` rebuilds the finished list. A very large custom cap would make all writers wait during a finish, but never readers.
+Writers hold one `ReentrantLock`, change the maps, and publish an immutable snapshot through a `volatile` field. Readers only read that field.
 
-`getSummary` and `getFinishedMatches` are separate calls, so a finish can land between them. A combined read would be a further operation, which the brief disallows. Calling `getSummary` first and `getFinishedMatches` second guarantees that any match started before the `getSummary` call appears in at least one list, unless it has been evicted.
+**Benefits:**
+
+- Reads never block. They wait for neither other readers nor writers, and a read is a single `volatile` field read.
+- Writes are atomic. Checking and reserving teams on start, and moving a match between lists on finish, happen in one critical section, so no reader sees partial state.
+- Read-your-writes holds, because a write publishes before it returns.
+- There are no retries. Each write does its work once, so its cost stays predictable during bursts such as six kick-offs at once.
+- A writer waiting for the lock parks on Java 21, so it does not pin a virtual thread.
+- It is simple to reason about: one lock, and one place where state changes.
+
+**Costs:**
+
+- Each state-changing write copies and sorts the live list under the lock. Writes do this work so that reads do none. That is cheap at up to about 100 live matches, but it would be the wrong choice for a write-heavy load.
+- Writers run one at a time, even for unrelated matches. The wait is estimated at microseconds, and has not been measured.
+- Two representations must stay in sync: the mutable maps and the snapshot. A write path that forgot to publish would leave readers with old data.
+- Each write allocates a new list and a new snapshot, which adds a little garbage collection work.
+- `finish` rebuilds the finished list under the lock. A very large custom cap would make all writers wait during a finish, but never readers.
+
+**Alternatives:**
+
+| Alternative | What it offers | Why not chosen |
+|---|---|---|
+| CAS with immutable state (`AtomicReference.updateAndGet`) | The strongest alternative: lock-free writes, and one source of truth with nothing to keep in sync | Retries repeat the copying and sorting, there is no fairness, and the transition function must have no side effects. The chosen approach is more predictable and easier to maintain for this load |
+| Single `ReentrantLock` for everything, copy inside and sort outside | The least code | Readers and writers wait for each other, and each read copies and sorts |
+| `ReentrantReadWriteLock` | Readers run in parallel | Readers still wait for writers, and each read still copies and sorts. More overhead than a plain lock for little gain |
+| `ConcurrentHashMap` alone | Each map is safe with no explicit lock | Check-then-insert across teams is not atomic, so two starts could both pass the live-team check |
+
+### Other concurrency choices
+
+| Choice | Benefit | Cost | Alternatives |
+|---|---|---|---|
+| `ReentrantLock` | Parks virtual threads on Java 21, never pins | One `try/finally` on each write | `synchronized`: less code and acceptable here, as JEP 444 says it need not be replaced around in-memory work, but it pins on Java 21. JDK 24 removed this pinning |
+| Default non-fair lock | Higher throughput | A writer can be overtaken | Fair lock: costs throughput, and waits are already microseconds |
+| Wrap the sorted live list instead of copying | Avoids a second copy on each write | Safe only while nothing else keeps a reference to that list | `List.copyOf`: safe by construction, but copies twice. `finishMatch` keeps it because it reads a live view of the map |
+| Separate `getSummary` and `getFinishedMatches` | Keeps exactly one extra operation | A finish can land between the two calls | Combined read: a further operation, which the brief disallows |
+
+Calling `getSummary` first and `getFinishedMatches` second guarantees that any match started before the `getSummary` call appears in at least one list, unless it has been evicted.
 
 ### Internal structure
 
-| Option | Why not chosen |
-|---|---|
-| Start counter with a `LiveMatch` record | Writes the tiebreak directly in the comparator, but adds a record and a counter, and a second ordering mechanism beside the finished matches. The chosen approach's tiebreak is implicit, so the code carries a comment and a test covers it |
-| Public `Team` record | Validating in its constructor would throw before the away team is checked, and a constructor does not know whether it is home or away, so the agreed error order and messages could not hold |
+| Choice | Benefit | Cost | Alternatives |
+|---|---|---|---|
+| `LinkedHashMap` insertion order plus a stable sort | Deterministic order even when ties | The tiebreak is implicit, so the code carries a comment and a test covers it | Start counter with a `LiveMatch` record: explicit in the comparator, but adds a record, a counter and a second ordering mechanism. Timestamps: same-tick ties have no defined order, and clocks can adjust |
 
-### Other alternatives
+### Public API
 
-| Topic | Alternative | Why not chosen |
-|---|---|---|
-| Team overlap | Reject only the same pairing | Allows one team in two matches |
-| Team overlap | Reject only an exact duplicate | Allows Canada vs Mexico, the same real match |
-| Team names | Trim only, or exact match | Case differences slip past the overlap rule |
-| Team names | Fixed team list, such as an enum | Carries a list that changes with each tournament |
-| Name cap | 32, 64 or 100 characters, or no limit | 1000 is generous and still catches garbage input. No limit accepts anything |
-| Over-length error | Include a preview or the full name | Puts garbage input in logs |
-| Rejections | Return a result, or silently ignore | A caller can miss the failure, and the board can drift |
-| Match identity | Team names | Needs reversed-team handling, and a late update could reach a rematch |
-| Match identity | Support both names and IDs | Two paths for each operation |
-| ID type | `MatchId` wrapping `long`, plain `UUID`, plain `long` | Cross-board collisions with `long`, and less type safety with plain types |
-| Score updates | Increment one goal, or support both | A duplicated or lost message corrupts the score, and both means more API |
-| Initial score | Optional starting score | Adds a parameter the brief does not need |
-| Start order | Timestamps | Same-tick ties have no defined order, and clocks can adjust |
-| Score range | `long` scores, or `BigInteger` | More range and cost than football needs |
-| Non-live ID | One combined error | The caller cannot tell a bad ID from a late update |
-| Error order | State checks first | The error for bad input would depend on match state |
-| Finish | Require one update first | A scoreless draw would need a pointless update |
-| Summary | Throw on an empty board | An idle board is normal |
-| Summary content | Formatted strings | Callers would parse text, and the ID is lost |
-| Fifth operation | Another operation, such as finding a live match by team | Finished list uses data already retained |
-| Retention | Keep all finished matches | Memory is not strictly bounded |
-| Retention | Keep evicted IDs | The ID set grows forever |
-| Finished order | Same as summary, or oldest first | The newest result would not be at the top |
-| Live matches | Enforced or configurable cap | Adds a failure to `startMatch` |
-| API shape | Single public class | The implementation becomes the API |
-| API shape | Match handle objects | Mutating handles complicate thread safety |
-| API shape | Builder | Only one setting exists |
-| `updateScore` return | `boolean`, or the `Match` | The no-op stays internal, for a smaller API |
-| `finishMatch` return | The finished `Match` | Smaller API, with the result in the finished list |
-| Exceptions | All custom types, or JDK types only | Replaces a familiar exception, or forces parsing message text |
-| Null input | `NullPointerException` | Invalid input would need two exception types |
-| Default cap | 104 or 10000 | 104 leaves no margin, and 10000 is more than needed |
-| Minimum cap | 0 | The newest finished match would not be kept |
-| Name cap | Configurable | No real use case, and would need a second setting |
-| Java version | 25 or 17 | 25 excludes reviewers on older JDKs, and 17 has no sequenced collections, which `sequencedValues()` needs |
-| Test stack | JUnit only, or adding jcstress | Wordier assertions, or a heavy setup for a simple library |
-| Feature commit | All retention work, or only the getter | Changes earlier error behaviour, or leaves dead code in core |
-| Update order | Sequence number on updates | Changes the API, and is listed as a future improvement |
-| Two-list reads | Combined read | A further operation, which the brief disallows |
+| Choice | Benefit | Cost | Alternatives |
+|---|---|---|---|
+| `MatchId` from `startMatch` | No reversed teams | The caller keeps the ID | Team names: needs reversed-team handling. Both: two paths for each operation |
+| `MatchId` wraps a UUID | Type safe, and unique across boards | Long in logs | Wrapping `long`: cross-board collisions. Plain `UUID` or `long`: less type safety |
+| Interface plus static factories | The implementation can change without affecting users | One more type | Single public class: the implementation becomes the API. Match handle objects: mutating handles complicate thread safety. Builder: only one setting exists |
+| One immutable `Match` record | Format-free, and cannot alter the board | Callers format their own output | Formatted strings: callers would parse text, and the ID is lost |
+| `updateScore` and `finishMatch` return `void` | A smaller API | Callers cannot see a no-op, or get a result directly from `finishMatch` | `boolean` or the `Match` from `updateScore`. The finished `Match` from `finishMatch` |
+| `IllegalArgumentException` for input, custom unchecked state exceptions | Familiar, and callers can catch exactly | Two kinds of failure to document | All custom types: replaces a familiar exception. JDK types only: forces parsing message text. `NullPointerException` for null: invalid input would need two exception types |
+
+### Behaviour
+
+| Choice | Benefit | Cost | Alternatives |
+|---|---|---|---|
+| Compare team names with `strip()` and lower case | Small and easy to explain | `TÜRKİYE` and `Türkiye` count as different teams | Trim only, or exact match: case differences slip past the overlap rule. Expanding the comparison to inner spaces, Unicode normalisation, accents and full case-folding: discussed, and postponed as a future improvement |
+| Team name cap of 1000, fixed | Catches garbage input without rejecting real names | Accepts names far longer than any real team | 32, 64 or 100 characters: less margin. No limit: accepts anything. Configurable: no real use case, and a second setting |
+| Absolute score updates | An immediate duplicate is harmless, and a lost update is corrected by the next one | A late older score looks like a correction, which is why in-order delivery is assumed | Increment one goal, or both: a duplicated or lost message corrupts the score. Sequence number on updates: changes the API, and is a future improvement |
+| Scores can be lowered | Supports VAR corrections and fixing mistakes | The library cannot tell a correction from a wrong or late update | Reject lower scores. Separate correction operation: more API, and the brief allows only one extra operation |
+| `int` scores with a `long` total | No overflow, and simple to use | Scores stop at about 2.1 billion | `long` scores or `BigInteger`: more range and cost than football needs |
+| Finish accepts any score | A 0-0 draw is a real result | An accidental finish is not caught | Require one update first: a scoreless draw would need a pointless update |
+
+### Finished matches
+
+| Choice | Benefit | Cost | Alternatives |
+|---|---|---|---|
+| Finished matches kept (as extra operation) | Results can be checked after a match has finished | Adds retention to a live scoreboard | Another operation, such as finding a live match by team |
+| Capped history with FIFO eviction | Memory is strictly bounded | A result can be evicted before it is read | Keep all finished matches: memory is not strictly bounded |
+| Evicted ID gives match not found | Keeps memory strictly bounded | An old ID cannot be told apart from an unknown one | Keep evicted IDs: the ID set grows forever |
+| Most recently finished first | The newest result is at the top | Finish order must be tracked | Same as summary: the newest finished result would not be at the top |
+| Default cap 1000, minimum 1 | Holds about ten tournaments, and the newest is always kept | One setting to document | 104: no margin. 10000: more than needed. Minimum of 0: the newest would not be kept |
+| No live match cap | Avoids a new failure in `startMatch` | The strict memory bound covers finished matches only | Enforced or configurable cap: adds a failure to `startMatch` |
+
+### Project
+
+| Choice | Benefit | Cost | Alternatives |
+|---|---|---|---|
+| Java 21 LTS | Sequenced collections, and wide compatibility | Excludes newer language features | 25: lower compatibility with older JDKs. 17: has no sequenced collections, which `sequencedValues()` needs |
+| JUnit 5 and AssertJ | Readable tests, and no runtime dependency | A second test dependency | Adding jcstress: a heavy setup for a simple library |
 
 ### Excluded scope
 
@@ -222,6 +263,23 @@ Persistence, match events, tournament rules and match cancellation are left out 
 ## Design and reasoning
 
 `Scoreboard` is the only entry point. The implementation, `InMemoryScoreboard`, is package-private, so its concurrency approach can change without affecting users.
+
+### Public API
+
+- **Match identity:** `startMatch` returns a `MatchId`, and `updateScore` and `finishMatch` use it. With team names alone, reversed home and away teams would need handling.
+- **ID type:** `MatchId` wraps a UUID. The wrapper means an ID cannot be confused with a score, and UUIDs are unique across boards, so an ID from another board is simply not found.
+- **Results:** one immutable `Match` record serves both lists. Callers format it as they like and cannot alter the board through it.
+- **Creation:** static factories are enough because there is one setting. A builder can be added if more settings appear.
+- **Return values:** `updateScore` and `finishMatch` return `void`, which keeps the API small. A no-op stays internal, and a final result is read from `getFinishedMatches`.
+
+### Error handling
+
+Failures fall into two groups, because callers handle them differently:
+
+- **Invalid input** is a caller bug, such as a null ID or a negative score. It uses `IllegalArgumentException`, which Java developers already expect.
+- **State conflicts** depend on the board, such as a team that is already playing. They use specific unchecked exceptions under `ScoreboardException`, so callers can catch one case or all of them without parsing messages.
+
+Input checks run before state checks, so the same bad input always gives the same error, whatever the board holds. Input is validated before the lock is taken, and state is checked before anything changes, so a rejection leaves the board untouched.
 
 ### State
 
@@ -254,6 +312,8 @@ A no-op skips the rebuild and the publish. A rejection changes nothing.
 
 `getSummary` and `getFinishedMatches` read the `volatile` field and return the immutable list, without taking the lock.
 
+The two lists are built differently. `sortedLive` wraps a fresh list with `Collections.unmodifiableList` rather than copying it, because nothing else holds that list, so it can never change. `finishMatch` uses `List.copyOf` because `sequencedValues().reversed()` is a live view of the finished map, which later finishes would change.
+
 ### Why this concurrency approach
 
 What must change together decides the design:
@@ -262,7 +322,7 @@ What must change together decides the design:
 - Update: find the match, replace it, rebuild the live list.
 - Finish: remove from live, release both teams, add to finished, evict, rebuild.
 
-So a single atomic write section is needed in any approach. Reads far outnumber state-changing writes, which suits publishing a snapshot:
+So a single atomic write section is needed in any approach. Reads far outnumber state-changing writes, as the [load figures](#load) show, and [usage assumptions](#assumptions) keep live matches few, which suits publishing a snapshot:
 
 - Reads never block, and writers never block reads.
 - Writers block only each other, and only for microseconds. This is an estimate, not a measurement.

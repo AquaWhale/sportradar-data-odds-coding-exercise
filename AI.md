@@ -2,7 +2,7 @@
 
 ## How AI tools were used
 
-AI was used for design, reasoning, code generation, testing and review. The human partner, Tjaša Hočevar, made every decision. The AI proposed options with trade-offs and recorded what was chosen.
+I retained final decision-making authority over the library's behavior, scope, public API, design, and implementation approach. I used AI to explore alternatives, research technical questions, draft the specification and implementation plan, generate code and tests, and review the result. I challenged or revised proposals and approved the specification and plan before implementation. AI then carried out implementation tasks within that agreed scope. The examples and prompt history below show where I selected, rejected, or changed its recommendations.
 
 The work moved through these stages:
 
@@ -11,7 +11,8 @@ The work moved through these stages:
 3. **Spec.** All decisions went into a written spec, reviewed twice by independent agents.
 4. **Plan.** The spec became a task-by-task implementation plan, also reviewed by an independent agent.
 5. **Implementation.** The AI implemented the plan with test-driven development, one commit per task.
-6. **Branch review.** A fresh agent reviewed the whole branch, ran mutants and found two test gaps, which were fixed.
+6. **Agent review.** A fresh agent reviewed the whole branch and ran mutants. Its two test gaps and six minor findings were all fixed.
+7. **Human review.** I then reviewed the library implementation myself, and built it and ran the tests manually.
 
 **Tools and models:**
 
@@ -19,19 +20,22 @@ The work moved through these stages:
 |---|---|
 | Claude Code desktop app | The main session, with Claude Opus 5.5 |
 | Superpowers skills | The workflow: brainstorming, writing plans, executing plans, test-driven development |
-| AskUserQuestion | Putting each decision to the human partner |
-| Subagents | Independent reviews, with fresh context. Spec and plan reviews used the session model. The branch review used Claude Opus, after a first attempt on Claude Fable failed because usage credits were unavailable |
+| AskUserQuestion | Putting decisions to me |
+| Subagents | Independent reviews, with fresh context. Spec and plan reviews used the session model. The branch review used Claude Opus |
 | WebSearch and WebFetch | Research on team names, match load, feed rates, locks and JEPs |
 
-**What the human partner changed:** the AI's proposals were not simply accepted. Examples from the history below:
+**What I changed:** I did not simply accept the AI's proposals. Examples from the history below:
 
 - Stopped a question that rested on an assumption, and required every assumption to be approved.
 - Chose `MatchId` over team names for identity, after the AI had leaned towards names.
 - Asked for research on name length, and set a much higher cap than proposed.
-- Questioned read blocking, which changed the AI's lock recommendation, then raised CAS and chose between the two.
+- Questioned read blocking, which changed the AI's lock recommendation. I then raised CAS, and kept the lock with a published snapshot when the AI recommended CAS, for predictability and no retries.
+- Capped finished match history to bound memory, when the AI recommended keeping everything.
+- Dropped the builder and returned `void` from `updateScore`, for a smaller API.
 - Proposed removing the start counter in favour of an ordered map.
 - Asked whether a `Team` type was needed, which led to `TeamName`.
-- Requested each independent review, and caught compile and wording errors in the plan and spec.
+- Requested independent reviews of the spec and the plan, and caught compile and wording errors in both.
+- Asked to remove a redundant list copy in `sortedLive` during code review.
 
 The AI also made mistakes, which were corrected along the way. It overstated the case against `synchronized` until JEP 444 was read, and it declared the maps as `Map` in the plan, which would not have compiled.
 
@@ -50,13 +54,19 @@ The assignment PDF, *ODDS and Data - JAVA Coding Task*, was the starting point. 
 
 ## Prompt history
 
-All of this happened in one session. User prompts are verbatim, and model output is summarised. Answers given through the question tool are marked **Answer**. Where the partner picked an offered option without typing, it is marked **Selected**.
+This is the history of my prompts for design, planning and implementation.
+
+- My prompts are verbatim, apart from light edits for readability and a removed local path.
+- Answers I gave through the question tool are marked **Answer**.
+- Where I picked an offered option without typing, it is marked **Selected** and condensed to the choice made.
+- Model output is summarised.
+- Implementation is summarised because it needed no prompts from me. After I approved the plan, the AI ran all the plan tasks and the whole-branch review without further prompts, until it asked how I wanted to finish.
 
 ### 1. Starting the brainstorm
 
 **Prompt:**
 
-> @"/Users/tasha/Downloads/ODDS and Data - JAVA Coding Task.pdf"
+> @"ODDS and Data - JAVA Coding Task.pdf"
 > /superpowers:brainstorming  Lets discuss the design and implementation of a simple Java library. Ask me as many questions as needed so we achieve a common understanding how a library should look and behave. The requirements are in the attached PDF file. Read them first. First lets thoroughly go through each operation that this library needs to support and how each operation should behave. Lets cover all possible edge cases and test scenarios. Do not disucss the design plan once we cover all behaviour of all operations and their test cases. After this we will discuss the library design, how public API should look like, what should be configurable by user, how to handle concurrency because library needs to be thread safe.
 
 **Model:** Read the PDF, summarised the requirements and gaps, proposed an order of discussion, and asked its first question on team overlap in prose.
@@ -110,7 +120,7 @@ All of this happened in one session. User prompts are verbatim, and model output
 
 > Do not make any assumptions. Each assumption should be checked by me before approving. So lets discuss:  assuming matches are identified by team names rather than a match ID
 
-**Model:** Saved the rule, listed its other unapproved assumptions, and put match identity to the partner.
+**Model:** Saved the rule, listed its other unapproved assumptions, and put match identity to me.
 
 **Answer:**
 
@@ -505,3 +515,16 @@ All of this happened in one session. User prompts are verbatim, and model output
 **Selected (minor findings):** Fix all six.
 
 **Model:** Fixed all six, and confirmed the test changes with mutants: a lock leaked on rejection, a split publish, and `trim()` in place of `strip()` are now all caught. The suite has 122 tests, passing on JDK 21 and JDK 25.
+
+**Prompt (summarised):** I asked for documentation fixes and for `package-info` files.
+
+**Model:** Made the documentation changes and added `package-info.java` for both packages.
+
+### 23. Code review fix
+
+**Prompt:**
+
+> Replace List.copyof(sorted) with Collections.unmodifiableList(sorted) inside sortedLive method while keeping the existing behavior of copy-on-write replace snapshot. We want to prevent the list to be copied twice into a new one.
+
+**Model:** Agreed, because `sorted` is a fresh list that nothing else holds or changes after `sortedLive` returns. Wrapping it keeps it immutable to callers, and the `volatile` publish keeps it safe across threads. It kept `List.copyOf` in `finishMatch`, because that one reads a live view of the finished map, so a copy is required. All 122 tests passed on JDK 21 and JDK 25, and the concurrency tests passed three more runs.
+

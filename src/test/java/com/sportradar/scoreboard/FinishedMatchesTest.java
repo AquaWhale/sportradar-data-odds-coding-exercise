@@ -56,12 +56,24 @@ class FinishedMatchesTest {
     void orderDependsOnFinishOrderNotStartOrderOrScore() {
         MatchId first = board.startMatch("Mexico", "Canada");
         MatchId second = board.startMatch("Spain", "Brazil");
-        board.updateScore(first, 5, 5);
+        board.updateScore(second, 5, 5);
 
         board.finishMatch(second);
         board.finishMatch(first);
 
         assertThat(board.getFinishedMatches()).extracting(Match::id).containsExactly(first, second);
+    }
+
+    @Test
+    void laterStartsAndUpdatesKeepTheFinishedList() {
+        MatchId finished = board.startMatch("Mexico", "Canada");
+        board.updateScore(finished, 2, 1);
+        board.finishMatch(finished);
+        List<Match> before = board.getFinishedMatches();
+
+        board.updateScore(board.startMatch("Spain", "Brazil"), 1, 0);
+
+        assertThat(board.getFinishedMatches()).isEqualTo(before);
     }
 
     @Test
